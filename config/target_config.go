@@ -20,7 +20,7 @@ import (
 type TargetConfig struct {
 	Name             string   `yaml:"name,omitempty" env:"NAME"`                     // name of the target
 	DSN              Secret   `yaml:"data_source_name" env:"DSN"`                    // data source name to connect to
-	AwsSecretKeyName string   `yaml:"aws_secret__keyname" env:"AWS_SECRET_KEY_NAME"` // Back-compat: Specify which key to source the DSN from (default: "DSN")
+	AwsSecretKeyName string   `yaml:"aws_secret_key_name" env:"AWS_SECRET_KEY_NAME"` // Back-compat: Specify which key to source the DSN from (default: "DSN")
 	AwsSecretName    string   `yaml:"aws_secret_name" env:"AWS_SECRET_NAME"`         // Back-compat: Secret with {"data_source_name": "..."}
 	AwsSecretArn     string   `yaml:"aws_secret_arn" env:"AWS_SECRET_ARN"`           // AWS Secrets Manager ARN with username/password JSON
 	AwsRegion        string   `yaml:"aws_region" env:"AWS_REGION"`                   // AWS region for the secret
