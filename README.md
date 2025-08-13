@@ -351,6 +351,30 @@ the secret. Policy example:
 
 Currently, AWS Secret Manager integration is only available for a single target configuration.
 
+### Option 2: Secret ARN with username/password JSON and DSN without credentials
+
+If you store credentials separately from the DSN, create a secret whose string value is a JSON object containing `username` and `password` fields:
+
+```json
+{
+  "username": "prom_user",
+  "password": "prom_password"
+}
+```
+
+In your exporter configuration, reference the secret ARN and region, and provide a DSN that omits credentials. The exporter will inject the credentials on startup and will re-fetch them and reconnect if pings fail (e.g., after rotation):
+
+```yaml
+target:
+  name: mssql_database
+  data_source_name: 'sqlserver://dbserver1.example.com:1433/dbname'
+  aws_secret_arn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:my-db-creds-AbCdEf'
+  aws_region: 'us-east-1'
+  collectors: [mssql_standard]
+```
+
+You may also set these with environment variables: `SQLEXPORTER_TARGET_AWS_SECRET_ARN` and `SQLEXPORTER_TARGET_AWS_REGION`.
+
 </details>
 
 <details>

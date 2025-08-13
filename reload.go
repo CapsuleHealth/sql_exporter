@@ -54,7 +54,7 @@ func reloadTarget(e Exporter, nc, cc *cfg.Config) error {
 	cc.Target = nc.Target
 	// Recreate the target object
 	target, err := NewTarget("", cc.Target.Name, "", string(cc.Target.DSN),
-		cc.Target.Collectors(), nil, cc.Globals, cc.Target.EnablePing)
+		cc.Target.Collectors(), nil, cc.Globals, cc.Target.EnablePing, cc.Target.AwsSecretArn, cc.Target.AwsRegion)
 	if err != nil {
 		slog.Error("Error recreating a target", "error", err)
 		return err

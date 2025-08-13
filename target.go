@@ -6,7 +6,9 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +42,8 @@ type target struct {
 	name               string
 	jobGroup           string
 	dsn                string
+	awsSecretArn       string
+	awsRegion          string
 	collectors         []Collector
 	constLabels        prometheus.Labels
 	globalConfig       *config.GlobalConfig
@@ -54,7 +58,7 @@ type target struct {
 // NewTarget returns a new Target with the given target name, data source name, collectors and constant labels.
 // An empty target name means the exporter is running in single target mode: no synthetic metrics will be exported.
 func NewTarget(
-	logContext, tname, jg, dsn string, ccs []*config.CollectorConfig, constLabels prometheus.Labels, gc *config.GlobalConfig, ep *bool) (
+	logContext, tname, jg, dsn string, ccs []*config.CollectorConfig, constLabels prometheus.Labels, gc *config.GlobalConfig, ep *bool, awsSecretArn string, awsRegion string) (
 	Target, errors.WithContext,
 ) {
 	if tname != "" {
@@ -94,6 +98,8 @@ func NewTarget(
 		name:               tname,
 		jobGroup:           jg,
 		dsn:                dsn,
+		awsSecretArn:       awsSecretArn,
+		awsRegion:          awsRegion,
 		collectors:         collectors,
 		constLabels:        constLabels,
 		globalConfig:       gc,
@@ -148,7 +154,7 @@ func (t *target) ping(ctx context.Context) errors.WithContext {
 	// We cannot do this only once at creation time because the sql.Open() documentation says it "may" open an actual
 	// connection, so it "may" actually fail to open a handle to a DB that's initially down.
 	if t.conn == nil {
-		conn, err := OpenConnection(ctx, t.logContext, t.dsn, t.globalConfig.MaxConns, t.globalConfig.MaxIdleConns, t.globalConfig.MaxConnLifetime)
+		conn, err := t.connectWithOptionalSecrets(ctx)
 		if err != nil {
 			if err != ctx.Err() {
 				return errors.Wrap(t.logContext, err)
@@ -172,7 +178,31 @@ func (t *target) ping(ctx context.Context) errors.WithContext {
 			}
 		}
 		if err != nil {
-			return errors.Wrap(t.logContext, err)
+			// If authentication might be invalid and we have AWS creds configured, try to refresh creds and reconnect once.
+			if t.awsSecretArn != "" {
+				slog.Warn("Ping failed, attempting credential refresh and reconnect", "logContext", t.logContext, "error", err)
+				// Close existing conn if present
+				if t.conn != nil {
+					_ = t.conn.Close()
+					t.conn = nil
+				}
+				conn, cerr := t.connectWithOptionalSecrets(ctx)
+				if cerr != nil {
+					return errors.Wrap(t.logContext, err)
+				}
+				t.conn = conn
+				// Try one more ping pass
+				for i := 0; i <= t.globalConfig.MaxConns; i++ {
+					if err = PingDB(ctx, t.conn); err != driver.ErrBadConn {
+						break
+					}
+				}
+				if err != nil {
+					return errors.Wrap(t.logContext, err)
+				}
+			} else {
+				return errors.Wrap(t.logContext, err)
+			}
 		}
 	}
 
@@ -197,4 +227,41 @@ func OfBool(i bool) *bool {
 
 func (t *target) JobGroup() string {
 	return t.jobGroup
+}
+
+// connectWithOptionalSecrets opens a connection, optionally fetching credentials from AWS Secrets Manager
+// and injecting them into the DSN before opening the connection.
+func (t *target) connectWithOptionalSecrets(ctx context.Context) (*sql.DB, error) {
+	dsnToUse := t.dsn
+	if t.awsSecretArn != "" {
+		username, password, err := config.ReadUserPassFromAwsSecretsManager(ctx, t.awsSecretArn, t.awsRegion)
+		if err != nil {
+			return nil, err
+		}
+		var buildErr error
+		dsnToUse, buildErr = buildDSNWithUserPass(t.dsn, username, password)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+	}
+	return OpenConnection(ctx, t.logContext, dsnToUse, t.globalConfig.MaxConns, t.globalConfig.MaxIdleConns, t.globalConfig.MaxConnLifetime)
+}
+
+// buildDSNWithUserPass injects username/password into a base DSN that may not include credentials.
+func buildDSNWithUserPass(baseDSN, username, password string) (string, error) {
+	// Try URL parse first
+	u, err := url.Parse(baseDSN)
+	if err == nil && u.Scheme != "" {
+		u.User = url.UserPassword(username, password)
+		return u.String(), nil
+	}
+	// Fallback: best-effort insertion
+	// Look for scheme separator
+	// Note: this won't cover all DSN variants, but is a reasonable fallback for URL-like DSNs.
+	const sep = "://"
+	if idx := strings.Index(baseDSN, sep); idx != -1 {
+		// Insert userinfo right after scheme://
+		return baseDSN[:idx+len(sep)] + url.UserPassword(username, password).String() + "@" + baseDSN[idx+len(sep):], nil
+	}
+	return baseDSN, nil
 }

@@ -20,7 +20,9 @@ import (
 type TargetConfig struct {
 	Name          string   `yaml:"name,omitempty" env:"NAME"`               // name of the target
 	DSN           Secret   `yaml:"data_source_name" env:"DSN"`              // data source name to connect to
-	AwsSecretName string   `yaml:"aws_secret_name" env:"AWS_SECRET_NAME"`   // AWS secret name
+	AwsSecretName string   `yaml:"aws_secret_name" env:"AWS_SECRET_NAME"`   // Back-compat: Secret with {"data_source_name": "..."}
+	AwsSecretArn  string   `yaml:"aws_secret_arn" env:"AWS_SECRET_ARN"`     // AWS Secrets Manager ARN with username/password JSON
+	AwsRegion     string   `yaml:"aws_region" env:"AWS_REGION"`             // AWS region for the secret
 	CollectorRefs []string `yaml:"collectors" env:"COLLECTORS"`             // names of collectors to execute on the target
 	EnablePing    *bool    `yaml:"enable_ping,omitempty" env:"ENABLE_PING"` // ping the target before executing the collectors
 
@@ -97,4 +99,53 @@ func readDSNFromAwsSecretManager(secretName string) Secret {
 		os.Exit(1)
 	}
 	return Secret(awsSecret.DSN)
+}
+
+// AwsUserPassSecret represents a Username/Password JSON blob in Secrets Manager.
+type AwsUserPassSecret struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// ReadUserPassFromAwsSecretsManager fetches a secret by ARN and returns username/password.
+// The secret payload is expected to be a JSON object with fields: {"username": "...", "password": "..."}.
+func ReadUserPassFromAwsSecretsManager(ctx context.Context, secretArn string, region string) (string, string, error) {
+	// Allow callers to pass nil; default to Background
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var cfg aws.Config
+	var err error
+	if region != "" {
+		cfg, err = awsConfig.LoadDefaultConfig(ctx, awsConfig.WithRegion(region))
+	} else {
+		// Fallback to IMDS-discovered region (useful on EC2)
+		cfg, err = awsConfig.LoadDefaultConfig(ctx, awsConfig.WithEC2IMDSRegion())
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("unable to load AWS config: %w", err)
+	}
+
+	client := secretsmanager.NewFromConfig(cfg)
+	input := &secretsmanager.GetSecretValueInput{
+		SecretId:     aws.String(secretArn),
+		VersionStage: aws.String("AWSCURRENT"),
+	}
+	result, err := client.GetSecretValue(ctx, input)
+	if err != nil {
+		return "", "", fmt.Errorf("unable to read AWS Secret: %w", err)
+	}
+	if result.SecretString == nil {
+		return "", "", fmt.Errorf("secret string is empty")
+	}
+
+	var up AwsUserPassSecret
+	if err := json.Unmarshal([]byte(*result.SecretString), &up); err != nil {
+		return "", "", fmt.Errorf("unable to unmarshal AWS Secret: %w", err)
+	}
+	if up.Username == "" || up.Password == "" {
+		return "", "", fmt.Errorf("secret missing username/password fields")
+	}
+	return up.Username, up.Password, nil
 }
