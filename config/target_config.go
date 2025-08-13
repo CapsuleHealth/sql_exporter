@@ -18,13 +18,14 @@ import (
 
 // TargetConfig defines a DSN and a set of collectors to be executed on it.
 type TargetConfig struct {
-	Name          string   `yaml:"name,omitempty" env:"NAME"`               // name of the target
-	DSN           Secret   `yaml:"data_source_name" env:"DSN"`              // data source name to connect to
-	AwsSecretName string   `yaml:"aws_secret_name" env:"AWS_SECRET_NAME"`   // Back-compat: Secret with {"data_source_name": "..."}
-	AwsSecretArn  string   `yaml:"aws_secret_arn" env:"AWS_SECRET_ARN"`     // AWS Secrets Manager ARN with username/password JSON
-	AwsRegion     string   `yaml:"aws_region" env:"AWS_REGION"`             // AWS region for the secret
-	CollectorRefs []string `yaml:"collectors" env:"COLLECTORS"`             // names of collectors to execute on the target
-	EnablePing    *bool    `yaml:"enable_ping,omitempty" env:"ENABLE_PING"` // ping the target before executing the collectors
+	Name             string   `yaml:"name,omitempty" env:"NAME"`                     // name of the target
+	DSN              Secret   `yaml:"data_source_name" env:"DSN"`                    // data source name to connect to
+	AwsSecretKeyName string   `yaml:"aws_secret__keyname" env:"AWS_SECRET_KEY_NAME"` // Back-compat: Specify which key to source the DSN from (default: "DSN")
+	AwsSecretName    string   `yaml:"aws_secret_name" env:"AWS_SECRET_NAME"`         // Back-compat: Secret with {"data_source_name": "..."}
+	AwsSecretArn     string   `yaml:"aws_secret_arn" env:"AWS_SECRET_ARN"`           // AWS Secrets Manager ARN with username/password JSON
+	AwsRegion        string   `yaml:"aws_region" env:"AWS_REGION"`                   // AWS region for the secret
+	CollectorRefs    []string `yaml:"collectors" env:"COLLECTORS"`                   // names of collectors to execute on the target
+	EnablePing       *bool    `yaml:"enable_ping,omitempty" env:"ENABLE_PING"`       // ping the target before executing the collectors
 
 	collectors []*CollectorConfig // resolved collector references
 
@@ -44,8 +45,12 @@ func (t *TargetConfig) UnmarshalYAML(unmarshal func(any) error) error {
 		return err
 	}
 
+	if t.AwsSecretKeyName == "" {
+		t.AwsSecretKeyName = "DSN"
+	}
+
 	if t.AwsSecretName != "" {
-		t.DSN = readDSNFromAwsSecretManager(t.AwsSecretName)
+		t.DSN = readDSNFromAwsSecretManager(t.AwsSecretKeyName, t.AwsSecretName)
 	}
 
 	// Check required fields
@@ -64,7 +69,7 @@ type AwsSecret struct {
 	DSN Secret `json:"data_source_name"`
 }
 
-func readDSNFromAwsSecretManager(secretName string) Secret {
+func readDSNFromAwsSecretManager(keyName, secretName string) Secret {
 	config, err := awsConfig.LoadDefaultConfig(context.TODO(), awsConfig.WithEC2IMDSRegion())
 	if err != nil {
 		slog.Error("unable to load AWS config", "error", err)
@@ -91,14 +96,21 @@ func readDSNFromAwsSecretManager(secretName string) Secret {
 	// Decrypts secret using the associated KMS key.
 	secretString := *result.SecretString
 
-	var awsSecret AwsSecret
-	jsonErr := json.Unmarshal([]byte(secretString), &awsSecret)
+	var secretMap map[string]any
+	jsonErr := json.Unmarshal([]byte(secretString), &secretMap)
 
 	if jsonErr != nil {
 		slog.Error("unable to unmarshal AWS Secret")
 		os.Exit(1)
 	}
-	return Secret(awsSecret.DSN)
+
+	val, ok := secretMap[keyName]
+	if !ok {
+		slog.Error("key not found in AWS Secret", "key", keyName)
+		os.Exit(1)
+	}
+
+	return Secret(fmt.Sprintf("%v", val))
 }
 
 // AwsUserPassSecret represents a Username/Password JSON blob in Secrets Manager.
